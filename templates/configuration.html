@@ -1,0 +1,109 @@
+{% extends 'base.html' %}
+{% block content %}
+  <div class="panel">
+    <h1>Configuration Validation</h1>
+    <form method="post" enctype="multipart/form-data">
+      <div class="form-field"><label for="raw_config">Paste network config</label><textarea id="raw_config" name="raw_config">{{ submitted_config }}</textarea></div>
+      <div class="form-field"><label for="vendor">Vendor</label><select id="vendor" name="vendor"><option value="auto" {% if selected_vendor == 'auto' %}selected{% endif %}>Auto</option><option value="cisco" {% if selected_vendor == 'cisco' %}selected{% endif %}>Cisco</option><option value="huawei" {% if selected_vendor == 'huawei' %}selected{% endif %}>Huawei</option><option value="juniper" {% if selected_vendor == 'juniper' %}selected{% endif %}>Juniper</option></select></div>
+      <div class="form-field"><label for="config_file">Upload config file</label><input id="config_file" name="config_file" type="file"></div>
+      <button type="submit">Validate configuration</button>
+    </form>
+    <div class="form-field">
+      <button type="button" id="live_validate_btn">Run Live Validation</button>
+      <button type="button" id="autofix_btn">Auto-fix &amp; Preview</button>
+    </div>
+  </div>
+  <div id="validator_panel" class="panel" style="display:none;">
+    <h2>Live Validation Results</h2>
+    <div id="validator_summary" class="small"></div>
+    <div class="panel">
+      <h3>Corrected / Ready Config</h3>
+      <pre id="validator_corrected" style="white-space:pre-wrap;">{{ result.corrected if result else '' }}</pre>
+    </div>
+    <div class="panel">
+      <h3>Line Details</h3>
+      <table id="validator_table" class="table"><thead><tr><th>Ln</th><th>Status</th><th>Message</th><th>Line</th></tr></thead><tbody></tbody></table>
+    </div>
+  </div>
+  {% if risk_summary %}
+    <div class="panel">
+      <h2>Risk summary</h2>
+      <div class="grid-3">
+        <div class="grid-card"><div class="card-title">State</div><div class="card-value">{{ risk_summary.state }}</div></div>
+        <div class="grid-card"><div class="card-title">Score</div><div class="card-value">{{ risk_summary.score }}</div></div>
+        <div class="grid-card"><div class="card-title">Label</div><div class="card-value">{{ risk_summary.label }}</div></div>
+      </div>
+    </div>
+  {% endif %}
+  {% if fix_review %}
+    <div class="panel">
+      <h2>Fix review</h2>
+      <table class="table"><thead><tr><th>Line</th><th>Severity</th><th>Issue</th><th>Original</th><th>Suggested</th></tr></thead><tbody>
+        {% for item in fix_review %}
+          <tr>
+            <td>{{ item.line_number }}</td>
+            <td>{{ item.severity }}</td>
+            <td>{{ item.issue }}</td>
+            <td><pre>{{ item.original_line }}</pre></td>
+            <td><pre>{{ item.suggested_line }}</pre></td>
+          </tr>
+        {% endfor %}
+      </tbody></table>
+    </div>
+  {% endif %}
+  {% if config_diff %}
+    <div class="panel">
+      <h2>Config diff</h2>
+      <table class="table"><thead><tr><th>Type</th><th>Old line</th><th>New line</th><th>Original</th><th>Corrected</th></tr></thead><tbody>
+        {% for diff in config_diff %}
+          <tr>
+            <td>{{ diff.type }}</td>
+            <td>{{ diff.old_line or '' }}</td>
+            <td>{{ diff.new_line or '' }}</td>
+            <td><pre>{{ diff.original or '' }}</pre></td>
+            <td><pre>{{ diff.corrected or '' }}</pre></td>
+          </tr>
+        {% endfor %}
+      </tbody></table>
+    </div>
+  {% endif %}
+{% endblock %}
+
+{% block scripts %}
+  <script>
+    function escapeHtml(s){ return String(s).replace(/[&<>"']/g, function(m){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":"&#39;"}[m]; }); }
+
+    async function callValidator(showAutoFix=false){
+      const config = document.getElementById('raw_config').value || '';
+      const vendor = document.getElementById('vendor').value || 'auto';
+      if(!config.trim()){ alert('Please provide configuration text first.'); return; }
+      try{
+        const resp = await fetch('/validator/api', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({config: config, vendor: vendor})
+        });
+        if(!resp.ok){ const t = await resp.text(); alert('Validation failed: '+t); return; }
+        const data = await resp.json();
+        document.getElementById('validator_panel').style.display = 'block';
+        document.getElementById('validator_summary').innerText = `Vendor: ${data.vendor} — Errors: ${data.error_count} Warnings: ${data.warning_count} Fixes: ${data.fix_count}`;
+        document.getElementById('validator_corrected').innerText = data.corrected || data.ready || '';
+        const tbody = document.querySelector('#validator_table tbody');
+        tbody.innerHTML = '';
+        (data.results || []).forEach(r=>{
+          const tr = document.createElement('tr');
+          tr.innerHTML = `<td>${r.ln||''}</td><td>${r.status||''}</td><td>${escapeHtml(r.msg||'')}</td><td><pre>${escapeHtml(r.raw||'')}</pre></td>`;
+          tbody.appendChild(tr);
+        });
+        if(showAutoFix){ document.getElementById('raw_config').value = data.corrected || data.ready || document.getElementById('raw_config').value; }
+      }catch(e){ alert('Validation error: '+e); }
+    }
+
+    document.addEventListener('DOMContentLoaded', ()=>{
+      const vbtn = document.getElementById('live_validate_btn');
+      const afbtn = document.getElementById('autofix_btn');
+      if(vbtn) vbtn.addEventListener('click', ()=>callValidator(false));
+      if(afbtn) afbtn.addEventListener('click', ()=>callValidator(true));
+    });
+  </script>
+{% endblock %}

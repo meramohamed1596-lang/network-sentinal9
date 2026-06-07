@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ title or 'Network Sentinel' }}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  </head>
+  <body>
+    <header>
+      <div class="brand">Network Sentinel</div>
+      <nav>
+        <a href="{{ url_for('dashboard') }}">Dashboard</a>
+        <a href="{{ url_for('configuration') }}">Configuration</a>
+        <a href="{{ url_for('devices') }}">Devices</a>
+        <a href="{{ url_for('topology') }}">Topology</a>
+        <a href="{{ url_for('snapshots') }}">Snapshots</a>
+        <a href="{{ url_for('logs') }}">Logs</a>
+        <a href="{{ url_for('alerts') }}">Alerts</a>
+        <a href="{{ url_for('settings') }}">Settings</a>
+        <a href="{{ url_for('logout') }}">Logout</a>
+      </nav>
+    </header>
+    <main class="container">
+      {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+          {% for category, message in messages %}
+            <div class="flash flash-{{ category }}">{{ message }}</div>
+          {% endfor %}
+        {% endif %}
+      {% endwith %}
+      {% block content %}{% endblock %}
+    </main>
+    <footer class="footer">Network Sentinel &bull; Intelligent network analysis and preview system</footer>
+    {% block scripts %}{% endblock %}
+  </body>
+</html>

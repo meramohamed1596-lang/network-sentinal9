@@ -3037,6 +3037,28 @@ def parse_network_config(text, vendor='auto'):
     except Exception as exc:
         print(f'[SEMANTIC] Validation skipped: {exc}')
 
+    # Merge semantic errors into the parse result and allow semantic fixes
+    try:
+        parse_partial = {
+            'ready': ready_config,
+            'corrected': corrected_config,
+            'errors': errors,
+            'warnings': warnings,
+            'error_count': error_count,
+            'warning_count': warning_count,
+            'fix_count': fix_count,
+        }
+        merged = ConfigValidator.merge_semantic_errors(parse_partial, semantic_errors)
+        # Adopt any semantic corrections / updated counters
+        corrected_config = merged.get('corrected', corrected_config)
+        fix_count = merged.get('fix_count', fix_count)
+        errors = merged.get('errors', errors)
+        warnings = merged.get('warnings', warnings)
+        error_count = merged.get('error_count', error_count)
+        warning_count = merged.get('warning_count', warning_count)
+    except Exception as exc:
+        print(f'[SEMANTIC MERGE] Failed to merge semantic fixes: {exc}')
+
     # ------------------------------------------------------------------
     # POST-FIX VERIFICATION (re-parse corrected config to confirm fixes)
     # ------------------------------------------------------------------

@@ -136,6 +136,8 @@ class CiscoValidator:
         errors.extend(self._check_duplicate_ips())
         errors.extend(self._check_subnet_overlaps())
         errors.extend(self._check_shutdown_interfaces())
+        errors.extend(self._check_missing_descriptions())
+        errors.extend(self._check_unencrypted_passwords())
         errors.extend(self._check_vlan_consistency())
         errors.extend(self._check_ospf_completeness())
         errors.extend(self._check_bgp_neighbors())
@@ -274,6 +276,64 @@ class CiscoValidator:
                         f'Trunk allows undefined VLANs: {sorted(undefined)}',
                         'warning', confidence='medium', category='switching', vendor='cisco',
                     ))
+        return errors
+
+    def _check_missing_descriptions(self):
+        """Warn when interfaces lack a description. Auto-fix by adding a descriptive tag."""
+        errors = []
+        if self.parse:
+            for obj in self.parse.find_objects(r'^interface\s+'):
+                has_desc = any(re.match(r'^\s*description\s+', c.text, re.IGNORECASE) for c in obj.children)
+                if not has_desc:
+                    errors.append(make_error(
+                        obj.linenum, 'semantic', f'{obj.text.strip()} missing description',
+                        'warning', fix='description Managed by NetworkSentinel', confidence='medium', category='interface', vendor='cisco'
+                    ))
+        else:
+            current_intf = None
+            has_desc = False
+            for i, line in enumerate(self.raw_lines, 1):
+                im = re.match(r'^interface\s+(.+)', line, re.IGNORECASE)
+                if im:
+                    if current_intf and not has_desc:
+                        errors.append(make_error(current_intf_line, 'semantic', f'interface {current_intf} missing description', 'warning', fix='description Managed by NetworkSentinel', confidence='medium', category='interface', vendor='cisco'))
+                    current_intf = im.group(1).strip()
+                    current_intf_line = i
+                    has_desc = False
+                elif current_intf:
+                    if re.match(r'^\s*description\s+', line, re.IGNORECASE):
+                        has_desc = True
+                    if re.match(r'^(interface|!|hostname|router|vlan)', line, re.IGNORECASE):
+                        # end of interface block
+                        if not has_desc:
+                            errors.append(make_error(current_intf_line, 'semantic', f'interface {current_intf} missing description', 'warning', fix='description Managed by NetworkSentinel', confidence='medium', category='interface', vendor='cisco'))
+                        current_intf = None
+                        has_desc = False
+            # tail
+            if current_intf and not has_desc:
+                errors.append(make_error(current_intf_line, 'semantic', f'interface {current_intf} missing description', 'warning', fix='description Managed by NetworkSentinel', confidence='medium', category='interface', vendor='cisco'))
+        return errors
+
+    def _check_unencrypted_passwords(self):
+        """Detect unencrypted passwords (password 0) and suggest secure replacements.
+
+        - For `enable password 0 <pw>` suggest `enable secret <SECURE_SECRET>`.
+        - For `username X password 0 <pw>` suggest `username X secret <SECURE_SECRET>`.
+        - For other `password 0` occurrences suggest `service password-encryption`.
+        """
+        errors = []
+        for i, line in enumerate(self.raw_lines, 1):
+            m = re.match(r'^enable\s+password\s+0\s+(.+)', line, re.IGNORECASE)
+            if m:
+                errors.append(make_error(i, 'security', 'Unencrypted enable password found (password 0)', 'error', fix='enable secret <SECURE_SECRET>', confidence='high', category='security', vendor='cisco'))
+                continue
+            um = re.match(r'^username\s+(\S+)\s+password\s+0\s+(.+)', line, re.IGNORECASE)
+            if um:
+                user = um.group(1)
+                errors.append(make_error(i, 'security', f'Unencrypted password for user {user}', 'error', fix=f'username {user} secret <SECURE_SECRET>', confidence='high', category='security', vendor='cisco'))
+                continue
+            if re.search(r'\bpassword\s+0\b', line, re.IGNORECASE):
+                errors.append(make_error(i, 'security', 'Unencrypted password token found (password 0)', 'warning', fix='service password-encryption', confidence='medium', category='security', vendor='cisco'))
         return errors
 
     def _check_ospf_completeness(self):
@@ -684,6 +744,40 @@ class HuaweiValidator:
             ))
         return errors
 
+    def _check_missing_quit_and_aaa(self):
+        """Detect missing 'quit' terminators for hierarchical sections and missing AAA config.
+
+        Auto-fix: append 'quit' at end of the section and add a minimal AAA block if missing.
+        """
+        errors = []
+        # Find section headers and whether they are closed by a 'quit' or 'return'
+        headers = []  # (line_no, header)
+        for i, line in enumerate(self.raw_lines, 1):
+            if re.match(r'^interface\s+', line, re.IGNORECASE) or re.match(r'^(ospf|bgp|vlan|acl|ip\s+route-static)\b', line, re.IGNORECASE):
+                headers.append((i, line.strip()))
+        # For each header, look ahead until next header; if no 'quit' found, flag
+        for idx, (ln, hdr) in enumerate(headers):
+            end = headers[idx + 1][0] if idx + 1 < len(headers) else len(self.raw_lines) + 1
+            found_quit = False
+            for j in range(ln + 1, end):
+                if j - 1 < len(self.raw_lines) and re.match(r'^(quit|return)\b', self.raw_lines[j - 1].strip(), re.IGNORECASE):
+                    found_quit = True
+                    break
+            if not found_quit:
+                errors.append(make_error(ln, 'syntax', f"Section starting at line {ln} ('{hdr}') appears to lack a terminating 'quit'", 'error', fix='quit', confidence='medium', category='syntax', vendor='huawei'))
+
+        # AAA presence
+        has_aaa_global = any(re.match(r'^aaa\b', l.strip(), re.IGNORECASE) or re.match(r'^local-user\b', l.strip(), re.IGNORECASE) for l in self.raw_lines)
+        if not has_aaa_global:
+            # Add a minimal AAA configuration block as a suggested fix
+            fix_block = [
+                'aaa',
+                ' local-user admin password irreversible-cipher <SECURE_PASSWORD>',
+                ' local-user admin service-type ssh',
+            ]
+            errors.append(make_error(None, 'security', 'No AAA/local-user configuration detected; devices may allow unauthenticated access', 'error', fix=fix_block, confidence='high', category='security', vendor='huawei'))
+        return errors
+
 
 # ===================================================================
 #  Juniper JunOS Validator
@@ -868,6 +962,32 @@ class JuniperValidator:
                 ))
         return errors
 
+    def _check_brace_balance(self):
+        """Check for mismatched '{' and '}' in Junos configs and suggest closing braces."""
+        errors = []
+        open_count = 0
+        close_count = 0
+        for i, line in enumerate(self.raw_lines, 1):
+            open_count += line.count('{')
+            close_count += line.count('}')
+        if open_count > close_count:
+            missing = open_count - close_count
+            fixes = ['}' for _ in range(missing)]
+            errors.append(make_error(None, 'syntax', f'Missing {missing} closing brace(s) "}}" in Junos configuration', 'error', fix=fixes, confidence='high', category='syntax', vendor='juniper'))
+        elif close_count > open_count:
+            # extra closing braces are syntax errors but harder to auto-fix
+            errors.append(make_error(None, 'syntax', f'Extra closing brace(s) in Junos configuration', 'error', fix=None, confidence='medium', category='syntax', vendor='juniper'))
+        return errors
+
+    def _check_missing_commit(self):
+        """Detect 'set' style configs without a final 'commit' and suggest adding it."""
+        errors = []
+        has_set = any(l.strip().lower().startswith('set ') for l in self.raw_lines)
+        has_commit = any(l.strip().lower() == 'commit' or l.strip().lower().startswith('commit') for l in self.raw_lines)
+        if has_set and not has_commit:
+            errors.append(make_error(None, 'semantic', 'Configuration contains candidate-style "set" statements but lacks a final "commit"', 'warning', fix='commit', confidence='medium', category='management', vendor='juniper'))
+        return errors
+
 
 # ===================================================================
 #  Unified entry point
@@ -927,29 +1047,32 @@ class ConfigValidator:
 
         Updates parse_result in-place and returns it.
         """
+        # Ensure result containers exist
+        parse_result.setdefault('semantic_errors', [])
+        parse_result.setdefault('error_categories', {})
+        parse_result.setdefault('errors', [])
+        parse_result.setdefault('warnings', [])
+        parse_result.setdefault('fix_count', parse_result.get('fix_count', 0))
+
         if not semantic_errors:
-            parse_result.setdefault('semantic_errors', [])
-            parse_result.setdefault('error_categories', {})
             return parse_result
 
         # Add semantic errors to the result
-        parse_result.setdefault('semantic_errors', [])
         parse_result['semantic_errors'].extend(semantic_errors)
 
-        # Count errors by category
-        categories = parse_result.setdefault('error_categories', {})
+        # Count errors by category and append formatted messages
+        categories = parse_result['error_categories']
         for err in semantic_errors:
             cat = err.get('category', 'general')
             sev = err.get('severity', 'error')
             categories[cat] = categories.get(cat, 0) + 1
 
-            # Add to main errors/warnings lists
+            # Build human-readable string
             line_prefix = ''
             if err.get('line_numbers'):
                 lnums = err['line_numbers']
                 if lnums and lnums[0] is not None:
                     line_prefix = f'Line {lnums[0]}: '
-
             formatted = f"{line_prefix}{err['message']}"
             if sev in ('error', 'critical'):
                 parse_result['errors'].append(formatted)
@@ -957,5 +1080,43 @@ class ConfigValidator:
             elif sev == 'warning':
                 parse_result['warnings'].append(formatted)
                 parse_result['warning_count'] = parse_result.get('warning_count', 0) + 1
+
+        # ------------------------------------------------------------------
+        # Attempt to apply machine-safe semantic fixes to the corrected config
+        # Each ValidationError dict may include a `fix` field; apply those
+        # replacements to `parse_result['corrected']` (fall back to `ready`).
+        # This produces an updated corrected config that includes semantic fixes
+        # (non-destructive: only replaces explicit lines when a fix is provided).
+        # ------------------------------------------------------------------
+        def _apply_fixes_to_text(text, errors_list):
+            if not text:
+                return text, 0
+            lines = text.splitlines()
+            applied = 0
+            for err in errors_list:
+                fix = err.get('fix')
+                lnums = err.get('line_numbers') or []
+                if not fix or not lnums:
+                    continue
+                for ln in lnums:
+                    if ln is None or ln < 1 or ln > len(lines):
+                        continue
+                    # Replace the targeted line with the provided fix
+                    # If fix is a list, join it; else use string
+                    if isinstance(fix, (list, tuple)):
+                        new_text = '\n'.join(fix)
+                    else:
+                        new_text = fix
+                    if lines[ln - 1].strip() != new_text.strip():
+                        lines[ln - 1] = new_text
+                        applied += 1
+            return '\n'.join(lines), applied
+
+        base_text = parse_result.get('corrected') or parse_result.get('ready') or ''
+        new_text, applied_count = _apply_fixes_to_text(base_text, semantic_errors)
+        if applied_count:
+            parse_result['corrected'] = new_text
+            parse_result['fix_count'] = parse_result.get('fix_count', 0) + applied_count
+            parse_result['auto_fixed'] = True
 
         return parse_result

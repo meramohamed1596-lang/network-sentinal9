@@ -532,6 +532,49 @@ def configuration():
                            selected_device_id=selected_device_id)
 
 
+@app.route('/validator/api', methods=['POST'])
+@login_required
+def validator_api():
+    payload = request.get_json(silent=True) or {}
+    raw_config = payload.get('config', '')
+    vendor = payload.get('vendor', 'auto')
+    if not raw_config.strip():
+        return jsonify({'error': 'Empty configuration provided.'}), 400
+
+    result = parse_network_config(raw_config, vendor=vendor)
+    response_lines = []
+    for line in result.get('line_details', []):
+        status = 'ok'
+        msg = None
+        if line.get('errors'):
+            status = 'error'
+            msg = '; '.join(line.get('errors') or [])
+        elif line.get('warnings'):
+            status = 'warning'
+            msg = '; '.join(line.get('warnings') or [])
+        note = 'comment' if line.get('line', '').strip().startswith(('!', '#', '//')) else None
+        response_lines.append({
+            'ln': line.get('num'),
+            'raw': line.get('line'),
+            'status': status,
+            'msg': msg,
+            'note': note,
+        })
+
+    return jsonify({
+        'results': response_lines,
+        'vendor': result.get('vendor'),
+        'corrected': result.get('corrected', result.get('ready', raw_config)),
+        'ready': result.get('ready', raw_config),
+        'error_count': result.get('error_count', 0),
+        'warning_count': result.get('warning_count', 0),
+        'summary': result.get('analysis', ''),
+        'total_lines': result.get('total_lines', 0),
+        'fix_count': result.get('fix_count', 0),
+        'accuracy': result.get('accuracy', 0),
+    })
+
+
 @app.route('/configuration/snapshot', methods=['POST'])
 @login_required
 def create_change_snapshot():
